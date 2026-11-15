@@ -1,0 +1,543 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<!-- viewport-fit=cover so the video is not clipped by the notch on a phone -->
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Leaf classifier — apple, cherry, chestnut, maple</title>
+<!-- a tab icon in the page itself, so the browser does not ask for /favicon.ico and log a 404 -->
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='0.9em' font-size='90'>🌿</text></svg>">
+<style>
+  :root { color-scheme: light dark; --line: #d8dee4; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 16px 16px 40px; max-width: 620px; margin-inline: auto;
+    font: 16px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    background: #fbfbf9; color: #1b1b1b;
+  }
+  h1 { font-size: 1.3rem; margin: 4px 0 2px; }
+  .sub { margin: 0 0 14px; color: #566; font-size: .9rem; }
+  video, canvas.hidden-src { width: 100%; max-width: 420px; display: block;
+    background: #10140f; border-radius: 12px; aspect-ratio: 1 / 1; object-fit: cover; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin: 12px 0; }
+  button, .filelabel {
+    font: inherit; padding: 10px 16px; border-radius: 10px; border: 1px solid #2c6e49;
+    background: #2c6e49; color: #fff; cursor: pointer;
+  }
+  button.secondary { background: #fff; color: #2c6e49; }
+  input[type=file] { position: absolute; width: 1px; height: 1px; opacity: 0; }
+  #status { font-size: .9rem; color: #444; min-height: 1.3em; }
+  #probs { margin-top: 10px; }
+  .bar { display: grid; grid-template-columns: 5.2em 1fr 4.2em; gap: 8px;
+    align-items: center; margin: 7px 0; }
+  .bar .name { font-weight: 600; }
+  .track { height: 20px; background: #e6e6e2; border-radius: 6px; overflow: hidden; }
+  .fill { height: 100%; width: 0%; background: #2c6e49; transition: width .18s linear; }
+  .bar.top .fill { background: #1f7a3f; }
+  .bar.top .name::after { content: " ★"; color: #1f7a3f; }
+  .num { font-variant-numeric: tabular-nums; text-align: right; }
+  table.check { border-collapse: collapse; margin-top: 10px; font-size: .88rem; }
+  table.check th, table.check td { border: 1px solid var(--line); padding: 3px 8px;
+    text-align: right; font-variant-numeric: tabular-nums; }
+  table.check th:first-child, table.check td:first-child { text-align: left; }
+  .card { border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px;
+    background: #fff; margin-top: 18px; }
+  .card h2 { font-size: 1rem; margin: 0 0 6px; }
+  .qr { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
+  .qr canvas { image-rendering: pixelated; border: 6px solid #fff; outline: 1px solid var(--line); }
+  a { color: #2c6e49; word-break: break-all; }
+  code { background: #f0f0ec; padding: 1px 4px; border-radius: 4px; }
+  .err { color: #b00020; }
+</style>
+</head>
+<body>
+
+<h1>Leaf classifier in your browser</h1>
+<p class="sub">Four species: <strong>apple, cherry, chestnut, maple</strong>. The network
+runs here, in this page — the picture is never sent anywhere.</p>
+
+<video id="video" playsinline autoplay muted></video>
+<canvas id="frame" width="96" height="96" class="hidden-src"></canvas>
+
+<div class="row">
+  <button id="start">Start the rear camera</button>
+  <button id="stop" class="secondary" hidden>Stop</button>
+  <label class="filelabel secondary" for="file">Upload a photo</label>
+  <input type="file" id="file" accept="image/*">
+</div>
+<p id="status">Loading the model …</p>
+
+<div id="probs"></div>
+<div id="check"></div>
+
+<div class="card">
+  <h2>Open this page on a phone</h2>
+  <div class="qr">
+    <canvas id="qr" width="0" height="0" aria-label="QR code to this page"></canvas>
+    <div>
+      Point the phone camera at the code, or tap the link.<br>
+      <a id="pageLink" href="#"></a>
+    </div>
+  </div>
+  <p style="font-size:.85rem;color:#667">The code is generated in this page from the
+  address the page itself was loaded from, so it always points at this deployment.</p>
+</div>
+
+<p style="font-size:.85rem;color:#667;margin-top:18px">
+Model <code>leaf_model.onnx</code> (MobileNetV3-Small, exported from PyTorch) run by
+ONNX Runtime Web. Preprocessing read from <code>model_info.json</code>: centre square →
+96 × 96 → ÷255 → per-channel (x − mean)/std → 1 × 3 × 96 × 96, RGB, channels first.
+</p>
+
+<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.21.0/dist/ort.min.js"></script>
+<script>
+"use strict";
+
+/* ------------------------------------------------------------------------
+   What this page loads from the network. Nothing else, and no image data
+   is ever sent: every request below is a GET of a static file.
+     1. ort.min.js  + its .wasm  — ONNX Runtime Web, from the jsDelivr CDN
+     2. leaf_model.onnx           — our trained network, same folder
+     3. model_info.json           — classes + preprocessing, same folder
+     4. check_expected.json       — only for the built-in check table (optional)
+   ------------------------------------------------------------------------ */
+
+const ortCdn = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.21.0/dist/";
+// GitHub Pages does not send the COOP/COEP headers a phone needs for
+// SharedArrayBuffer, so ONNX Runtime must run its WASM in a single thread.
+ort.env.wasm.wasmPaths = ortCdn;
+ort.env.wasm.numThreads = 1;
+ort.env.wasm.proxy = false;
+ort.env.logLevel = "error";
+
+const statusEl = document.getElementById("status");
+const video = document.getElementById("video");
+const frame = document.getElementById("frame");
+const fctx = frame.getContext("2d", { willReadFrequently: true });
+const probsEl = document.getElementById("probs");
+const checkEl = document.getElementById("check");
+
+let info = null;        // {classes, input_size, mean, std} from model_info.json
+let session = null;
+let stream = null;
+let busy = false;
+let timer = null;
+
+function setStatus(text, isError) {
+  statusEl.textContent = text;
+  statusEl.classList.toggle("err", !!isError);
+}
+
+/* ---------------------------------------------------------------- model -- */
+
+async function init() {
+  try {
+    info = await (await fetch("model_info.json", { cache: "no-cache" })).json();
+    // the session runs the network; the wasm backend works in every mobile
+    // browser, including Safari on iPhone
+    session = await ort.InferenceSession.create("leaf_model.onnx", {
+      executionProviders: ["wasm"], graphOptimizationLevel: "all",
+    });
+    buildBars();
+    setStatus("Model ready. Press “Start the rear camera”, or upload a photo.");
+  } catch (error) {
+    setStatus("Could not load the model: " + error.message, true);
+    console.error(error);
+  }
+}
+
+function buildBars() {
+  probsEl.innerHTML = "";
+  for (const name of info.classes) {
+    const row = document.createElement("div");
+    row.className = "bar";
+    row.innerHTML = `<span class="name">${name}</span>` +
+                    `<span class="track"><span class="fill"></span></span>` +
+                    `<span class="num">—</span>`;
+    probsEl.appendChild(row);
+  }
+}
+
+function showProbabilities(probabilities) {
+  window.__lastProbs = probabilities.slice();      // exact values, for the check below
+  const rows = [...probsEl.children];
+  const best = probabilities.indexOf(Math.max(...probabilities));
+  info.classes.forEach((name, i) => {
+    const row = rows[i];
+    row.classList.toggle("top", i === best);
+    row.querySelector(".fill").style.width = (100 * probabilities[i]).toFixed(1) + "%";
+    row.querySelector(".num").textContent = (100 * probabilities[i]).toFixed(2) + "%";
+  });
+}
+
+/* -------------------------------------------------------- preprocessing -- */
+/* The one place a picture becomes a tensor. It follows model_info.json and is
+   the same for the camera and for an uploaded photo:
+     centre square  ->  resized to input_size x input_size  ->  RGBA pixels
+     ->  (pixel/255 - mean)/std per channel  ->  RGB planes one after another
+   The result is NCHW, shape 1 x 3 x size x size, float32. */
+
+function fillTensorFrom(source) {
+  const size = info.input_size;
+  if (frame.width !== size) { frame.width = size; frame.height = size; }
+
+  // 1. the centre square of the source, drawn straight into a size x size canvas
+  const w = source.videoWidth || source.naturalWidth || source.width;
+  const h = source.videoHeight || source.naturalHeight || source.height;
+  const side = Math.min(w, h);
+  const left = (w - side) / 2, top = (h - side) / 2;
+  fctx.clearRect(0, 0, size, size);
+  fctx.drawImage(source, left, top, side, side, 0, 0, size, size);
+
+  // 2. the pixels, standardised channel by channel, into three planes
+  const data = fctx.getImageData(0, 0, size, size).data;   // RGBA, row by row
+  const pixels = size * size;
+  const tensor = new Float32Array(3 * pixels);
+  const mean = info.mean, std = info.std;
+  for (let i = 0; i < pixels; i++) {
+    const r = data[i * 4], g = data[i * 4 + 1], b = data[i * 4 + 2];
+    tensor[i] = (r / 255 - mean[0]) / std[0];                  // red plane
+    tensor[pixels + i] = (g / 255 - mean[1]) / std[1];         // green plane
+    tensor[2 * pixels + i] = (b / 255 - mean[2]) / std[2];     // blue plane
+  }
+  return new ort.Tensor("float32", tensor, [1, 3, size, size]);
+}
+
+async function classify(source) {
+  if (!session) return;
+  busy = true;
+  try {
+    const feeds = { [session.inputNames[0]]: fillTensorFrom(source) };
+    const output = await session.run(feeds);
+    const logits = output[session.outputNames[0]].data;      // raw scores, no softmax
+    const top = Math.max(...logits);
+    const exponentials = [...logits].map(v => Math.exp(v - top));
+    const sum = exponentials.reduce((a, b) => a + b, 0);
+    showProbabilities(exponentials.map(v => v / sum));
+  } catch (error) {
+    setStatus("Inference failed: " + error.message, true);
+  } finally {
+    busy = false;
+  }
+}
+
+/* --------------------------------------------------------------- camera -- */
+
+async function startCamera() {
+  if (!session) { setStatus("Wait for the model to load first.", true); return; }
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    setStatus("This browser has no camera access. Use “Upload a photo” " +
+              "(the page must be opened over https).", true);
+    return;
+  }
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: { facingMode: { ideal: "environment" },       // the rear camera
+               width: { ideal: 1280 }, height: { ideal: 1280 } },
+    });
+    video.srcObject = stream;
+    await video.play();                                    // iOS needs the await
+    document.getElementById("start").hidden = true;
+    document.getElementById("stop").hidden = false;
+    setStatus("Classifying " + video.videoWidth + "×" + video.videoHeight +
+              " frames — the picture stays on your phone.");
+    timer = setInterval(() => { if (!busy && video.readyState >= 2) classify(video); }, 250);
+  } catch (error) {
+    setStatus("Camera refused (" + error.name + "): " + error.message +
+              " — you can still upload a photo.", true);
+  }
+}
+
+function stopCamera() {
+  if (timer) clearInterval(timer);
+  timer = null;
+  if (stream) stream.getTracks().forEach(track => track.stop());
+  stream = null;
+  video.srcObject = null;
+  document.getElementById("start").hidden = false;
+  document.getElementById("stop").hidden = true;
+  setStatus("Camera stopped.");
+}
+
+/* --------------------------------------------------------------- upload -- */
+
+async function onFile(event) {
+  const file = event.target.files[0];
+  if (!file || !session) return;
+  setStatus("Reading " + file.name + " …");
+  // imageOrientation "from-image" applies the EXIF rotation, so a photo taken
+  // sideways on a phone is read the right way up
+  const bitmap = await createImageBitmap(file, { imageOrientation: "from-image" });
+  await classify(bitmap);
+  setStatus(file.name + " → " + info.classes[
+    [...probsEl.children].findIndex(r => r.classList.contains("top"))] + " (see the bars).");
+  bitmap.close();
+  maybeShowCheckTable(file.name);
+  event.target.value = "";
+}
+
+/* A small helper for the check of requirement 2: upload check_image.jpg and the
+   page puts its own probabilities next to the ones the notebook computed. */
+async function maybeShowCheckTable(fileName) {
+  if (!/^check_image\.jpg$/i.test(fileName)) { checkEl.innerHTML = ""; return; }
+  let expected = null;
+  try {
+    expected = await (await fetch("check_expected.json", { cache: "no-cache" })).json();
+  } catch (e) { return; }
+  const rows = info.classes.map((name, i) => {
+    const shown = (window.__lastProbs || [])[i];
+    const e = expected[name];
+    const difference = Math.abs(e - shown);
+    return `<tr><td>${name}</td><td>${e.toFixed(6)}</td><td>${shown.toFixed(6)}</td>` +
+           `<td>${difference < 1e-3 ? "ok" : "differs"} (${difference.toExponential(1)})</td></tr>`;
+  }).join("");
+  checkEl.innerHTML = `<table class="check"><tr><th>class</th>` +
+    `<th>notebook</th><th>this page</th><th>agree</th></tr>${rows}</table>`;
+}
+
+/* ------------------------------------------------------------------- QR -- */
+/* A small QR-code encoder (byte mode, error-correction level L, versions 1-5),
+   written into the canvas below. No external QR service is contacted. */
+
+const QR = (() => {
+  // version -> {total codewords, ec codewords} for ECC level L, single block
+  const VERSIONS = { 1: [26, 7], 2: [44, 10], 3: [70, 15], 4: [100, 20], 5: [134, 26] };
+  const ALIGN = { 1: [], 2: [18], 3: [22], 4: [26], 5: [30] };
+
+  // Galois field GF(256), primitive polynomial x^8+x^4+x^3+x^2+1 (0x11d)
+  const EXP = new Uint8Array(512), LOG = new Uint8Array(256);
+  for (let i = 0, x = 1; i < 255; i++) {
+    EXP[i] = x; LOG[x] = i;
+    x <<= 1; if (x & 0x100) x ^= 0x11d;
+  }
+  for (let i = 255; i < 512; i++) EXP[i] = EXP[i - 255];
+  const mul = (a, b) => (a === 0 || b === 0) ? 0 : EXP[LOG[a] + LOG[b]];
+
+  function generator(degree) {                       // RS generator polynomial,
+    let poly = [1];                                  // highest power first, monic
+    for (let i = 0; i < degree; i++) {
+      const next = new Uint8Array(poly.length + 1);
+      for (let j = 0; j < poly.length; j++) {
+        next[j] ^= poly[j];                          // poly * x
+        next[j + 1] ^= mul(poly[j], EXP[i]);         // poly * alpha^i
+      }
+      poly = next;
+    }
+    return poly;
+  }
+
+  function ecc(data, degree) {                       // remainder of the division
+    const gen = generator(degree);                   // by gen, a shift register
+    const remainder = new Uint8Array(degree);
+    for (const byte of data) {
+      const factor = byte ^ remainder[0];
+      remainder.copyWithin(0, 1);
+      remainder[degree - 1] = 0;
+      for (let j = 0; j < degree; j++) remainder[j] ^= mul(gen[j + 1], factor);
+    }
+    return remainder;
+  }
+
+  function codewords(text) {
+    const bytes = new TextEncoder().encode(text);
+    let version = 0;
+    for (const v of Object.keys(VERSIONS)) {         // smallest version that fits
+      const [total, ec] = VERSIONS[v];
+      if (total - ec >= Math.ceil((4 + 8 + bytes.length * 8) / 8)) { version = +v; break; }
+    }
+    if (!version) throw new Error("text too long for QR versions 1-5");
+    const [total, ecDegree] = VERSIONS[version];
+    const bits = [];
+    const push = (value, length) => {
+      for (let i = length - 1; i >= 0; i--) bits.push((value >> i) & 1);
+    };
+    push(0b0100, 4);                                 // byte mode
+    push(bytes.length, 8);                           // length, 8 bits for v1-9
+    for (const byte of bytes) push(byte, 8);
+    push(0, Math.min(4, (total - ecDegree) * 8 - bits.length));   // terminator
+    while (bits.length % 8) bits.push(0);                          // pad to a byte
+    const data = new Uint8Array((total - ecDegree) * 8 / 8);
+    for (let i = 0; i < bits.length; i += 8)
+      data[i / 8] = bits.slice(i, i + 8).reduce((a, b) => (a << 1) | b, 0);
+    for (let i = bits.length / 8, pad = 0xec; i < data.length; i++, pad ^= 0xec ^ 0x11)
+      data[i] = pad;                                                 // 0xEC 0x11 ...
+    return { version, data, ec: ecc(data, ecDegree) };
+  }
+
+  function build(text, forcedMask) {
+    const { version, data, ec } = codewords(text);
+    const size = 17 + 4 * version;
+    const modules = Array.from({ length: size }, () => new Int8Array(size));  // -1 unset
+    const function_ = Array.from({ length: size }, () => new Uint8Array(size));
+
+    const finder = (row, col) => {
+      for (let r = -1; r <= 7; r++) for (let c = -1; c <= 7; c++) {
+        const y = row + r, x = col + c;
+        if (y < 0 || y >= size || x < 0 || x >= size) continue;
+        const dark = (r >= 0 && r <= 6 && (c === 0 || c === 6)) ||
+                     (c >= 0 && c <= 6 && (r === 0 || r === 6)) ||
+                     (r >= 2 && r <= 4 && c >= 2 && c <= 4);
+        modules[y][x] = dark ? 1 : 0; function_[y][x] = 1;
+      }
+    };
+    finder(0, 0); finder(0, size - 7); finder(size - 7, 0);
+    for (let i = 8; i < size - 8; i++) {                       // timing patterns
+      modules[6][i] = (i % 2 === 0) ? 1 : 0; function_[6][i] = 1;
+      modules[i][6] = (i % 2 === 0) ? 1 : 0; function_[i][6] = 1;
+    }
+    for (const centre of ALIGN[version]) {                     // alignment pattern
+      for (let r = -2; r <= 2; r++) for (let c = -2; c <= 2; c++) {
+        const dark = Math.max(Math.abs(r), Math.abs(c)) !== 1;
+        modules[centre + r][centre + c] = dark ? 1 : 0;
+        function_[centre + r][centre + c] = 1;
+      }
+    }
+    modules[size - 8][8] = 1; function_[size - 8][8] = 1;      // dark module
+    for (let i = 0; i < 9; i++) {                              // format areas
+      if (!function_[8][i]) { function_[8][i] = 1; modules[8][i] = 0; }
+      if (!function_[i][8]) { function_[i][8] = 1; modules[i][8] = 0; }
+    }
+    for (let i = 0; i < 8; i++) {
+      if (!function_[8][size - 1 - i]) { function_[8][size - 1 - i] = 1; modules[8][size - 1 - i] = 0; }
+      if (!function_[size - 1 - i][8]) { function_[size - 1 - i][8] = 1; modules[size - 1 - i][8] = 0; }
+    }
+
+    // the data bits, in the two-vertical-module columns, bottom to top, alternating up/down
+    const stream = [];
+    for (const byte of data) for (let i = 7; i >= 0; i--) stream.push((byte >> i) & 1);
+    for (const byte of ec) for (let i = 7; i >= 0; i--) stream.push((byte >> i) & 1);
+    let bit = 0, upward = true;
+    for (let right = size - 1; right > 0; right -= 2) {
+      if (right === 6) right = 5;                    // skip the vertical timing column
+      for (let step = 0; step < size; step++) {
+        const row = upward ? size - 1 - step : step;
+        for (const column of [right, right - 1]) {
+          if (function_[row][column]) continue;
+          modules[row][column] = bit < stream.length ? stream[bit] : 0;
+          bit++;
+        }
+      }
+      upward = !upward;
+    }
+
+    const format = (mask) => {
+      const value = (0b01 << 3) | mask;              // 0b01 = ECC level L
+      let remainder = value << 10;
+      for (let i = 14; i >= 10; i--)
+        if (remainder & (1 << i)) remainder ^= 0x537 << (i - 10);
+      const bits = ((value << 10) | remainder) ^ 0x5412;
+      const at = (i) => (bits >> i) & 1;             // bit 14 is the most significant
+      // copy 1: bits 0-6 run down column 8 (skipping the timing row), bits 7-14
+      // run left along row 8 (skipping the timing column)
+      for (let i = 0; i <= 5; i++) modules[i][8] = at(i);
+      modules[7][8] = at(6);
+      modules[8][8] = at(7);
+      modules[8][7] = at(8);
+      for (let i = 0; i <= 5; i++) modules[8][5 - i] = at(9 + i);
+      // copy 2: bits 0-7 along row 8 to the right, bits 7-14 up column 8 below
+      for (let i = 0; i <= 7; i++) modules[8][size - 1 - i] = at(i);
+      for (let i = 0; i <= 6; i++) modules[size - 1 - i][8] = at(14 - i);
+      modules[size - 8][8] = 1;                      // the dark module is always dark
+    };
+
+    const penalty = () => {                          // the four standard rules
+      let score = 0;
+      const runs = (line) => {
+        let run = 1, add = 0;
+        for (let i = 1; i < line.length; i++) {
+          if (line[i] === line[i - 1]) run++;
+          else { if (run >= 5) add += run - 2; run = 1; }
+        }
+        if (run >= 5) add += run - 2;
+        return add;
+      };
+      for (let i = 0; i < size; i++) {
+        score += runs(modules[i].slice());
+        score += runs(modules.map(row => row[i]));
+      }
+      for (let r = 0; r < size - 1; r++) for (let c = 0; c < size - 1; c++) {
+        const v = modules[r][c];
+        if (v === modules[r][c + 1] && v === modules[r + 1][c] && v === modules[r + 1][c + 1]) score += 3;
+      }
+      const pattern = [1, 0, 1, 1, 1, 0, 1, 0, 0, 0, 0];
+      const looks = (line, start) => pattern.every((p, k) => line[start + k] === p);
+      for (let i = 0; i < size; i++) {
+        const row = modules[i], column = modules.map(r => r[i]);
+        for (let j = 0; j + 11 <= size; j++) {
+          if (looks(row, j) || looks(row.slice().reverse(), size - 11 - j)) score += 40;
+          if (looks(column, j) || looks(column.slice().reverse(), size - 11 - j)) score += 40;
+        }
+      }
+      let dark = 0;
+      for (let r = 0; r < size; r++) for (let c = 0; c < size; c++) dark += modules[r][c];
+      score += 10 * Math.floor(Math.abs(dark * 100 / (size * size) - 50) / 5);
+      return score;
+    };
+
+    const masked = (mask) => {
+      const flip = (r, c) => {
+        let condition;
+        switch (mask) {
+          case 0: condition = (r + c) % 2 === 0; break;
+          case 1: condition = r % 2 === 0; break;
+          case 2: condition = c % 3 === 0; break;
+          case 3: condition = (r + c) % 3 === 0; break;
+          case 4: condition = (Math.floor(r / 2) + Math.floor(c / 3)) % 2 === 0; break;
+          case 5: condition = (r * c) % 2 + (r * c) % 3 === 0; break;
+          case 6: condition = ((r * c) % 2 + (r * c) % 3) % 2 === 0; break;
+          default: condition = ((r + c) % 2 + (r * c) % 3) % 2 === 0;
+        }
+        if (condition) modules[r][c] ^= 1;
+      };
+      for (let r = 0; r < size; r++) for (let c = 0; c < size; c++)
+        if (!function_[r][c]) flip(r, c);
+    };
+
+    const copies = [];
+    for (let mask = 0; mask < 8; mask++) {
+      masked(mask); format(mask);
+      copies.push({ score: penalty(), copy: modules.map(r => r.slice()) });
+      masked(mask);                                  // the mask is its own inverse
+    }
+    // forcedMask only exists so that test_qr.py can compare every mask against a
+    // reference implementation; the page itself always takes the best one
+    if (forcedMask !== undefined) return copies[forcedMask].copy;
+    return copies.reduce((a, b) => (b.score < a.score ? b : a)).copy;
+  }
+
+  function draw(canvas, text, scale) {
+    const modules = build(text);
+    const quiet = 4, size = modules.length, side = (size + 2 * quiet) * scale;
+    canvas.width = canvas.height = side;
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, side, side);
+    ctx.fillStyle = "#000";
+    for (let r = 0; r < size; r++) for (let c = 0; c < size; c++)
+      if (modules[r][c]) ctx.fillRect((c + quiet) * scale, (r + quiet) * scale, scale, scale);
+    return modules;
+  }
+  return { draw, build };
+})();
+
+/* ----------------------------------------------------------------- start -- */
+
+document.getElementById("start").addEventListener("click", startCamera);
+document.getElementById("stop").addEventListener("click", stopCamera);
+document.getElementById("file").addEventListener("change", onFile);
+window.addEventListener("beforeunload", stopCamera);
+
+// the QR encodes the address this page was loaded from, so the code and the
+// deployed page can never disagree
+const pageUrl = location.href.split("#")[0].split("?")[0];
+document.getElementById("pageLink").href = pageUrl;
+document.getElementById("pageLink").textContent = pageUrl;
+try {
+  window.__qr = QR.draw(document.getElementById("qr"), pageUrl, 6);
+} catch (error) {
+  console.error("QR:", error);
+}
+init();
+</script>
+</body>
+</html>

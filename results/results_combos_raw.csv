@@ -1,0 +1,19 @@
+variant,seed,state,n_train,best_epoch,contaminated,val_acc,val_correct,hist_acc,hist_correct,cam_acc,cam_correct
+C1 best combo: +hist + AdamW wd 0.05,0,last,807,19,hist,0.7241,21/29,0.9167,110/120,0.7241,21/29
+C1 best combo: +hist + AdamW wd 0.05,0,best,807,19,hist,0.7931,23/29,0.9083,109/120,0.6207,18/29
+C1 best combo: +hist + AdamW wd 0.05,1,last,807,6,hist,0.7241,21/29,0.9083,109/120,0.7241,21/29
+C1 best combo: +hist + AdamW wd 0.05,1,best,807,6,hist,0.8621,25/29,0.8333,100/120,0.8276,24/29
+C1 best combo: +hist + AdamW wd 0.05,2,last,807,12,hist,0.7931,23/29,0.9167,110/120,0.7931,23/29
+C1 best combo: +hist + AdamW wd 0.05,2,best,807,12,hist,0.8276,24/29,0.925,111/120,0.7931,23/29
+C2 best combo: +hist + label smoothing,0,last,807,18,hist,0.7586,22/29,0.9333,112/120,0.7241,21/29
+C2 best combo: +hist + label smoothing,0,best,807,18,hist,0.7241,21/29,0.9083,109/120,0.7241,21/29
+C2 best combo: +hist + label smoothing,1,last,807,15,hist,0.7586,22/29,0.9083,109/120,0.7241,21/29
+C2 best combo: +hist + label smoothing,1,best,807,15,hist,0.7931,23/29,0.9083,109/120,0.6897,20/29
+C2 best combo: +hist + label smoothing,2,last,807,10,hist,0.6552,19/29,0.9083,109/120,0.7241,21/29
+C2 best combo: +hist + label smoothing,2,best,807,10,hist,0.8276,24/29,0.9,108/120,0.6897,20/29
+C3 best combo: +hist + AdamW + smoothing,0,last,807,9,hist,0.7241,21/29,0.9167,110/120,0.7241,21/29
+C3 best combo: +hist + AdamW + smoothing,0,best,807,9,hist,0.7241,21/29,0.9,108/120,0.8621,25/29
+C3 best combo: +hist + AdamW + smoothing,1,last,807,6,hist,0.7586,22/29,0.9417,113/120,0.7241,21/29
+C3 best combo: +hist + AdamW + smoothing,1,best,807,6,hist,0.7931,23/29,0.8917,107/120,0.7586,22/29
+C3 best combo: +hist + AdamW + smoothing,2,last,807,10,hist,0.8276,24/29,0.9167,110/120,0.7586,22/29
+C3 best combo: +hist + AdamW + smoothing,2,best,807,10,hist,0.7931,23/29,0.9167,110/120,0.6552,19/29
